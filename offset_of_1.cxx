@@ -8,110 +8,73 @@
 // by graphitemaster
 //
 
-template <size_t maxalign>
-struct unioner {
-  template <typename T0, typename T1, size_t O>
-  union U_inner {
-    struct {
-      char pad[O];  // offset
-
-      T1 m[sizeof(T0) / (sizeof(T1) + 1)];  // instance of type of member
-    } data;
-    U_inner<T0, T1, O + 1> other;
-  };
-
-  template <typename T0, typename T1>
-  union U_inner<T0, T1, 0> {
-    struct {
-      T1 m[sizeof(T0) / (sizeof(T1) + 1)];  // instance of type of member
-    } data;
-    U_inner<T0, T1, 1> other;
-  };
-
-  template <typename T0, typename T1>
-  union U_inner<T0, T1, maxalign> {};
-};
-
-template <typename T0, typename T1, typename T2>
+template <typename TSTRUCT, typename TMEMBER, typename TDUMMY, size_t N = 0>
 struct offset_of_impl {
-  using inner_t = typename unioner<alignof(T1)>::template U_inner<T0, T1, 0>;
   union U {
     char c;
-    inner_t m;
-    T0 object;
+#pragma pack(push, 1)
+    struct {
+      char pad[N];
+      TMEMBER m[sizeof(TSTRUCT) / sizeof(TMEMBER) + 1];
+    };
+#pragma pack(pop)
+    TSTRUCT object;
     constexpr U() : c(0) {}  // make c the active member
   };
+
+  // Has to be outide of offset: can't take address of a local
+  // Has to be static: this is not a constant expression
   static constexpr U u = {};
 
-  static constexpr const T1* addr_helper(const T1* base, const T1* target) {
+  static constexpr const TMEMBER* addr_helper(const TMEMBER* base,
+                                              const TMEMBER* target) {
     auto addr = base;
     while (addr < target) {
       addr++;
     }
     return addr;
   }
-  static constexpr ptrdiff_t addr_diff(const T1* base, const T1* target) {
-    return (target - base) * sizeof(T1);
-  }
 
-  template <size_t off, typename TT>
-  static constexpr std::ptrdiff_t offset2(T1 T2::*member, TT& union_part) {
-    const auto addr_target =
-        std::addressof(offset_of_impl<T0, T1, T2>::u.object.*member);
-    const auto addr_base = std::addressof(union_part.data.m[0]);
-    const auto addr = addr_helper(addr_base, addr_target);
+  static constexpr std::ptrdiff_t offset(TMEMBER TDUMMY::*member) {
+    // using addressof which ignores operator& overloading
+    constexpr const auto addr_base =
+        std::addressof(offset_of_impl<TSTRUCT, TMEMBER, TDUMMY, N>::u.m[0]);
+    // .*member is not a constant expressino
+    const auto addr_target = std::addressof(
+        offset_of_impl<TSTRUCT, TMEMBER, TDUMMY, N>::u.object.*member);
+    const auto addr_found = addr_helper(addr_base, addr_target);
 
-    // != will never return true... but < seems to work?
-    if (addr < addr_target) {
-      if constexpr (off + 1 < alignof(T1)) {
-        return offset2<off + 1>(member, union_part.other);
+    if (addr_found > addr_target) {
+      if constexpr (N < sizeof(TMEMBER)) {
+        return offset_of_impl<TSTRUCT, TMEMBER, TDUMMY, N + 1>::offset(member);
       } else {
-        throw 1;  // shouldn't happen
+        throw 1;
       }
     }
-    return (addr - addr_base) * sizeof(T1) + off;
-  }
 
-  static constexpr std::ptrdiff_t offset(T1 T2::*member) {
-    // The following avoids use of reinterpret_cast, so is constexpr.
-    // The subtraction gives the correct offset because the union layout rules
-    // guarantee that all union members have the same starting address. On the
-    // other hand, it will break if object.*member is not aligned.
-    const auto addr_target =
-        std::addressof(offset_of_impl<T0, T1, T2>::u.object.*member);
-    const auto addr_base =
-        (std::addressof(offset_of_impl<T0, T1, T2>::u.m.data.m[0]));
-    const auto addr = addr_helper(addr_base, addr_target);
-
-    return offset2<0>(member, offset_of_impl<T0, T1, T2>::u.m);
-
-    if (addr != addr_target) {
-      return 0;
-    }
-
-    return (addr - addr_base) * sizeof(T1);
+    return (addr_found - addr_base) * sizeof(TMEMBER) + N;
   }
 };
 
-template <typename T0, typename T1, typename T2>
-constexpr typename offset_of_impl<T0, T1, T2>::U offset_of_impl<T0, T1, T2>::u;
+template <typename TSTRUCT, typename TMEMBER, typename TDUMMY, size_t N>
+constexpr typename offset_of_impl<TSTRUCT, TMEMBER, TDUMMY, N>::U
+    offset_of_impl<TSTRUCT, TMEMBER, TDUMMY, N>::u;
 
-template <typename T0, typename T1, typename T2>
-inline constexpr std::ptrdiff_t offset_of(T1 T2::*member, T0* = nullptr) {
-  return offset_of_impl<T0, T1, T2>::offset(member);
+template <typename TSTRUCT, typename TMEMBER, typename TDUMMY>
+inline constexpr std::ptrdiff_t offset_of(TMEMBER TDUMMY::*member,
+                                          TSTRUCT* = nullptr) {
+  return offset_of_impl<TSTRUCT, TMEMBER, TDUMMY>::offset(member);
 }
-
-template <typename T0, T0::*member T1>
-void f() {}
 
 struct s {
   float a;
   char b;
   int c;
+  char d;
 };
 
 #pragma pack(push, 1)
-struct s2 {
+struct s_packed {
   float a;
   char b;
   int c;
@@ -119,6 +82,14 @@ struct s2 {
   char e;
 };
 #pragma pack(pop)
+
+struct s_oversized {
+  int f1;
+  s f2;
+  int f3;
+  s f4;
+  char f5;
+};
 
 struct a {
   int i;
@@ -130,41 +101,41 @@ struct b {
 };
 struct ab : public a, public b {};
 
-int main() {
-  constexpr size_t s_b = offset_of<s>(&s::b);
-  constexpr size_t s_c = offset_of<s>(&s::c);
-  // compilation error with both gcc & clang
-  constexpr size_t s2_c = offset_of<s2>(&s2::c);
-  std::cout << s_b << std::endl;
-  std::cout << s_c << std::endl;
-  std::cout << s2_c << std::endl;
-  std::cout << offset_of<s2>(&s2::e) << std::endl;
-  std::cout << alignof(&s2::e) << std::endl;
-
-  // these only work with gcc, not clang
-  // also generates a warning
-  // std::cout << offsetof(ab, a::i) << std::endl;
-  // std::cout << offsetof(ab, b::i) << std::endl;
-  auto ai = &ab::a::i;
-  auto bi = &ab::b::i;
-
-  ab v;
-  v.*ai = 11;
-  v.*bi = 22;
-
 #define DBG_PRINT(s) std::cout << #s << " = " << (s) << std::endl;
 
-  std::cout << ((a&)v).i << " " << ((b&)v).i << std::endl;
-  DBG_PRINT(offset_of<ab>(&ab::b::i));
-  DBG_PRINT(offset_of<ab>(&ab::a::i));
+int main() {
+  constexpr size_t s_b = offset_of<s>(&s::b);
+  DBG_PRINT(s_b);
+  static_assert(s_b == 4);
+  constexpr size_t s_c = offset_of<s>(&s::c);
+  DBG_PRINT(s_c);
+  static_assert(s_c == 8);
+  // pragma pack, unaligned
+  constexpr size_t packed_c = offset_of<s_packed>(&s_packed::c);
+  DBG_PRINT(packed_c);
+  static_assert(packed_c == 5);
 
-  DBG_PRINT(offset_of<ab>(&ab::k));
-  // incorrect result
-  DBG_PRINT(offset_of<ab>(&ab::b::k));
-  // doesn't work with clang, correct result with gcc
-  // DBG_PRINT((offsetof(ab, b::k)));
-  DBG_PRINT(offset_of<ab>(&ab::k));
-  DBG_PRINT((offsetof(ab, k)));
+  // sizeof > alignof
+  static_assert(sizeof(s) > 8);
+  static_assert(alignof(s) < 8);
+  constexpr size_t large_f2 = offset_of<s_oversized>(&s_oversized::f2);
+  DBG_PRINT(large_f2);
+  static_assert(large_f2 == 4);
+  constexpr size_t large_f4 = offset_of<s_oversized>(&s_oversized::f4);
+  DBG_PRINT(large_f4);
+  static_assert(large_f4 == 8 + sizeof(s));
+
+  constexpr size_t multi_b_i = offset_of<ab>(&ab::b::i);
+  static_assert(multi_b_i == 8);
+  DBG_PRINT(multi_b_i);
+  constexpr size_t multi_a_i = offset_of<ab>(&ab::a::i);
+  static_assert(multi_a_i == 0);
+  DBG_PRINT(multi_a_i);
+
+  constexpr size_t multi_k = offset_of<ab>(&ab::k);
+  DBG_PRINT(multi_k);
+  constexpr size_t multi_b_k = offset_of<ab>(&ab::b::k);
+  DBG_PRINT(multi_b_k);
 
   return 0;
 }
